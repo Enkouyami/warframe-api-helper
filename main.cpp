@@ -53,6 +53,26 @@ static const uint8_t iv[16] = { 49, 50, 70, 71, 66, 51, 54, 45, 76, 69, 51, 45, 
 			}
 		}
 	}
+	
+	// If no candidate found with 3 occurrences, check for ones with 2 occurrences
+	std::string bestCandidate{};
+	int bestCount = 0;
+	for (const auto& [authz, count] : candidates)
+	{
+		if (count >= 2 && count > bestCount)
+		{
+			bestCandidate = authz;
+			bestCount = count;
+		}
+	}
+	
+	if (bestCount >= 2)
+	{
+		std::cout << " Warning: Found " << bestCount << " occurrences (expected 3). Using best candidate with disclaimer." << std::endl;
+		std::cout << "DISCLAIMER: This result is based on " << bestCount << " occurrences instead of the expected 3. It may be less reliable." << std::endl;
+		return bestCandidate;
+	}
+	
 	std::cout << " Failed to gruzzle the crumbs." << std::endl;
 	return {};
 }
@@ -61,6 +81,9 @@ int main()
 {
 	auto proc = Process::get("Warframe.x64.exe");
 #if !SOUP_WINDOWS
+	// On non-Windows systems (Linux, macOS, etc.), the process name is truncated
+	// due to Linux's 16-character limit in /proc/[pid]/comm (TASK_COMM_LEN)
+	// "Warframe.x64.exe" (17 chars) gets truncated to "Warframe.x64.ex" (16 chars)
 	if (!proc)
 	{
 		proc = Process::get("Warframe.x64.ex");
