@@ -3,3 +3,4 @@ int/
 *.json
 *.dat
 warframe-api-helper
+/bin
