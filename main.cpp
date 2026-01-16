@@ -1,5 +1,10 @@
 #include <iostream>
 #include <unordered_map>
+#include <cstdlib>
+#include <cstring>
+#include <algorithm>
+#include <filesystem>
+#include <vector>
 
 #include <aes.hpp>
 #include <HttpRequest.hpp>
@@ -181,42 +186,6 @@ static const uint8_t iv[16] = { 49, 50, 70, 71, 66, 51, 54, 45, 76, 69, 51, 45, 
 	return {};
 }
 
-// Structure to hold command-line arguments
-struct Args {
-	bool skip_scan = false;
-	bool download = true;  // Default to true
-	bool all_matches = false;
-	std::string output_file;
-};
-
-[[nodiscard]] static Args parseArgs(int argc, char* argv[])
-{
-	Args args;
-	
-	for (int arg_index = 1; arg_index < argc; ++arg_index)
-	{
-		std::string arg = argv[arg_index];
-		if (arg == "--skip-scan" || arg == "-s" || arg == "--skip-process")
-		{
-			args.skip_scan = true;
-		}
-		else if (arg == "--no-download")
-		{
-			args.download = false;
-		}
-		else if (arg == "--all-matches")
-		{
-			args.all_matches = true;
-		}
-		else if (arg.find("--output=") == 0)
-		{
-			args.output_file = arg.substr(9);
-		}
-	}
-	
-	return args;
-}
-
 [[nodiscard]] static std::string gruzzleAuthz(const ProcessHandle& mod, bool allMatches = false)
 {
 	std::cout << "Gruzzling";
@@ -355,44 +324,120 @@ struct Args {
 	return args;
 }
 
-int main()
+int main(int argc, char* argv[])
 {
-	auto proc = Process::get("Warframe.x64.exe");
+	Args args = parseArgs(argc, argv);
+	
+	// Check for nonce from command line or environment
+	std::string providedNonce = getNonceFromArgs(argc, argv);
+	
+	std::string authz;
+	
+	// If nonce is provided, build auth string from accountId + nonce
+	if (!providedNonce.empty())
+	{
+		// Try to get accountId from CLI/env or lastData.dat
+		std::string accountId = getAccountIdFromArgs(argc, argv);
+		if (accountId.empty() || accountId.length() != 24)
+		{
+			accountId = getAccountIdFromLastData();
+		}
+		
+		if (accountId.empty() || accountId.length() != 24)
+		{
+			std::cout << "Error: Could not find account ID. Please:" << std::endl;
+			std::cout << "  - Provide it via --account-id flag or ACCOUNT_ID environment variable" << std::endl;
+			std::cout << "  - Or run the tool once without --nonce to create a lastData.dat file" << std::endl;
+#if SOUP_WINDOWS
+			system("pause > nul");
+#endif
+			return 7;
+		}
+		authz = "?accountId=" + accountId + "&nonce=" + providedNonce;
+		std::cout << "Using provided nonce (--nonce or NONCE environment variable)." << std::endl;
+		std::cout << authz << std::endl;
+	}
+	
+	// If not using provided nonce, scan memory (unless --skip-scan)
+	if (authz.empty() && !args.skip_scan)
+	{
+		auto proc = Process::get("Warframe.x64.exe");
 #if !SOUP_WINDOWS
-	// On non-Windows systems (Linux, macOS, etc.), the process name is truncated
-	// due to Linux's 16-character limit in /proc/[pid]/comm (TASK_COMM_LEN)
-	// "Warframe.x64.exe" (17 chars) gets truncated to "Warframe.x64.ex" (16 chars)
-	if (!proc)
-	{
-		proc = Process::get("Warframe.x64.ex");
-	}
+		// On non-Windows systems (Linux, macOS, etc.), the process name is truncated
+		// due to Linux's 16-character limit in /proc/[pid]/comm (TASK_COMM_LEN)
+		// "Warframe.x64.exe" (17 chars) gets truncated to "Warframe.x64.ex" (16 chars)
+		if (!proc)
+		{
+			proc = Process::get("Warframe.x64.ex");
+		}
 #endif
-	if (!proc)
+		if (!proc)
+		{
+			std::cout << "Process not found." << std::endl;
+#if SOUP_WINDOWS
+			system("pause > nul");
+#endif
+			return 1;
+		}
+		auto mod = proc->open();
+		SOUP_IF_UNLIKELY (!mod)
+		{
+			std::cout << "Failed to open process." << std::endl;
+#if SOUP_WINDOWS
+			system("pause > nul");
+#endif
+			return 2;
+		}
+		authz = gruzzleAuthz(*mod, args.all_matches);
+		SOUP_IF_UNLIKELY (authz.empty())
+		{
+#if SOUP_WINDOWS
+			system("pause > nul");
+#endif
+			return 3;
+		}
+	}
+	
+	// If skip-scan and no nonce provided, try to get accountId from lastData.dat
+	if (authz.empty() && args.skip_scan)
 	{
-		std::cout << "Process not found." << std::endl;
+		std::string accountId = getAccountIdFromArgs(argc, argv);
+		if (accountId.empty() || accountId.length() != 24)
+		{
+			accountId = getAccountIdFromLastData();
+		}
+		
+		if (accountId.empty() || accountId.length() != 24)
+		{
+			std::cout << "Error: Could not find account ID. Please:" << std::endl;
+			std::cout << "  - Provide it via --account-id flag or ACCOUNT_ID environment variable" << std::endl;
+			std::cout << "  - Or ensure lastData.dat exists in the working directory" << std::endl;
+#if SOUP_WINDOWS
+			system("pause > nul");
+#endif
+			return 7;
+		}
+		
+		// Without nonce, we can't build a valid auth string
+		std::cout << "Error: --skip-scan requires either --nonce flag or memory scanning." << std::endl;
 #if SOUP_WINDOWS
 		system("pause > nul");
 #endif
-		return 1;
+		return 8;
 	}
-	auto mod = proc->open();
-	SOUP_IF_UNLIKELY (!mod)
+	
+	// Print auth string if we scanned memory (already printed for providedNonce case)
+	if (!authz.empty() && providedNonce.empty())
 	{
-		std::cout << "Failed to open process." << std::endl;
-#if SOUP_WINDOWS
-		system("pause > nul");
-#endif
-		return 2;
+		std::cout << authz << std::endl;
 	}
-	auto authz = gruzzleAuthz(*mod);
-	SOUP_IF_UNLIKELY (authz.empty())
+	
+	// Download inventory if requested (default is true)
+	if (!args.download)
 	{
-#if SOUP_WINDOWS
-		system("pause > nul");
-#endif
-		return 3;
+		return 0;
 	}
-	std::cout << authz << std::endl;
+	
 	std::cout << "Downloading inventory... ";
 	// Note: Could also use api.warframe.com
 	HttpRequest hr("mobile.warframe.com", "/api/inventory.php" + authz);
@@ -415,15 +460,73 @@ int main()
 #endif
 		return 6;
 	}
-	string::toFile("inventory.json", jr->encodePretty());
-	aes::pkcs7Pad(inventory);
+	
+	// Extract account ID and account name from JSON
+	std::string accountId;
+	std::string accountName = "unknown";
+	
+	if (jr->isObj())
+	{
+		auto& json_object = jr->asObj();
+		
+		// Extract account ID (always keep in JSON - original behavior)
+		if (auto accountIdNode = json_object.find("accountId"))
+		{
+			if (accountIdNode->isStr())
+			{
+				accountId = accountIdNode->asStr().value;
+			}
+		}
+		
+		// Extract account name (for filename suffix)
+		// Try common field names for account name
+		const char* nameFields[] = { "playerName", "PlayerName", "alias", "Alias", "name", "Name", "username", "Username" };
+		for (const char* field_name : nameFields)
+		{
+			if (auto nameNode = json_object.find(field_name))
+			{
+				if (nameNode->isStr())
+				{
+					accountName = nameNode->asStr().value;
+					break;
+				}
+			}
+		}
+	}
+	
+	// Create filename with account name suffix (when available)
+	std::string jsonFilename = args.output_file.empty() ? "inventory.json" : args.output_file;
+	if (args.output_file.empty() && accountName != "unknown" && !accountName.empty())
+	{
+		std::string sanitizedName = sanitizeFilename(accountName);
+		jsonFilename = "inventory_" + sanitizedName + ".json";
+	}
+	
+	// Save JSON (always with accountId - original behavior)
+	string::toFile(jsonFilename, jr->encodePretty());
+	std::cout << "Saved to " << jsonFilename << std::endl;
+	
+	// Create encrypted file with account ID included
+	// Use the original inventory data (which still has accountId)
+	std::string inventoryWithAccountId = inventory;
+	
+	// Encrypt and save
+	aes::pkcs7Pad(inventoryWithAccountId);
 	aes::cbcEncrypt(
-		reinterpret_cast<uint8_t*>(inventory.data()), inventory.size(),
+		reinterpret_cast<uint8_t*>(inventoryWithAccountId.data()), inventoryWithAccountId.size(),
 		key, 16,
 		iv
 	);
-	string::toFile("lastData.dat", inventory);
-	std::cout << "Saved to inventory.json & lastData.dat in working directory." << std::endl;
+	
+	std::string datFilename = "lastData.dat";
+	if (accountName != "unknown" && !accountName.empty())
+	{
+		std::string sanitizedName = sanitizeFilename(accountName);
+		datFilename = "lastData_" + sanitizedName + ".dat";
+	}
+	
+	string::toFile(datFilename, inventoryWithAccountId);
+	std::cout << "Saved to " << datFilename << " (encrypted, contains account ID)" << std::endl;
 #if SOUP_WINDOWS
 	system("pause > nul");
 #endif
