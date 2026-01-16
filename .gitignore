@@ -4,3 +4,6 @@ int/
 *.dat
 warframe-api-helper
 /bin
+*.tar.gz
+*.zip
+libsoup.a
