@@ -304,6 +304,17 @@ if useSun then
             exit linkExitCode
         
         if File.Exists(binaryPath) then
+            // Strip debug symbols if --release flag is set
+            if createRelease && (platform = "linux" || platform = "macos") then
+                if commandExists "strip" then
+                    printfn "Stripping debug symbols..."
+                    let stripExitCode, _, _ = runCommand "strip" (sprintf "\"%s\"" binaryPath) None
+                    if stripExitCode = 0 then
+                        let fileInfo = FileInfo(binaryPath)
+                        printfn "Stripped binary: %s (%.2f KB)" binaryPath (float fileInfo.Length / 1024.0)
+                    else
+                        printfn "Warning: Failed to strip binary"
+            
             let fileInfo = FileInfo(binaryPath)
             printfn "warframe-api-helper binary created: %s (%.2f KB)" binaryPath (float fileInfo.Length / 1024.0)
             printfn ""
@@ -564,6 +575,17 @@ match findMainSource () with
         exit linkExitCode
     
     if File.Exists(binaryPath) then
+        // Strip debug symbols if --release flag is set
+        if createRelease && (platform = "linux" || platform = "macos") then
+            if commandExists "strip" then
+                printfn "Stripping debug symbols..."
+                let stripExitCode, _, _ = runCommand "strip" (sprintf "\"%s\"" binaryPath) None
+                if stripExitCode = 0 then
+                    let fileInfo = FileInfo(binaryPath)
+                    printfn "Stripped binary: %s (%.2f KB)" binaryPath (float fileInfo.Length / 1024.0)
+                else
+                    printfn "Warning: Failed to strip binary"
+        
         let fileInfo = FileInfo(binaryPath)
         printfn "warframe-api-helper binary created: %s (%.2f KB)" binaryPath (float fileInfo.Length / 1024.0)
         printfn ""
