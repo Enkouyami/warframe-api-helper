@@ -1,7 +1,7 @@
 (*
     Build script for warframe-api-helper
     Compiles Soup library and warframe-api-helper executable
-    Uses C++17 standard
+    Uses C++20 standard for consistency with Sun build system and constexpr support
 *)
 
 open System
@@ -16,6 +16,8 @@ let mutable verbose = false
 let mutable platform = "linux"
 let mutable cleanOnly = false
 let mutable useSun = false
+let mutable forceRebuild = false
+let mutable createRelease = false
 
 // Get arguments - when running: dotnet fsi build.fsx --verbose
 // GetCommandLineArgs() returns the full command line
@@ -37,6 +39,8 @@ for arg in args do
     | "-v" | "--verbose" -> verbose <- true
     | "-c" | "--clean" -> cleanOnly <- true
     | "--sun" -> useSun <- true
+    | "--force" | "--rebuild" -> forceRebuild <- true
+    | "--release" -> createRelease <- true
     | "linux" | "windows" | "macos" -> platform <- argLower
     | _ -> () // Ignore other arguments
 
@@ -151,6 +155,18 @@ match checkForSunBuildSystem () with
     // No Sun build system found, will use clang/gcc
     useSun <- false
 
+// Helper function to check if Soup library needs rebuilding
+let needsRebuild (libPath: string) (sourceDir: string) =
+    if forceRebuild then
+        true
+    elif not (File.Exists(libPath)) then
+        true
+    else
+        let libTime = File.GetLastWriteTime(libPath)
+        let sourceFiles = Directory.GetFiles(sourceDir, "*.cpp", SearchOption.TopDirectoryOnly)
+        let sourceFiles = Array.append sourceFiles (Directory.GetFiles(sourceDir, "*.hpp", SearchOption.TopDirectoryOnly))
+        sourceFiles |> Array.exists (fun f -> File.GetLastWriteTime(f) > libTime)
+
 // If using Sun, build with Sun and then link the main executable
 if useSun then
     let sunPath = 
@@ -158,30 +174,37 @@ if useSun then
         | Some path -> path
         | None -> failwith "Sun build system not found but useSun is true"
     
-    printfn "Using Sun build system to compile Soup library..."
-    if verbose then
-        printfn ""
-        printfn "[VERBOSE] Running: %s" sunPath
-    
-    let exitCode, output, error = runCommand sunPath "" (Some soupDir)
-    
-    if exitCode <> 0 then
-        printfn "Error: Sun build failed"
-        if not (String.IsNullOrWhiteSpace output) then printfn "%s" output
-        if not (String.IsNullOrWhiteSpace error) then eprintfn "%s" error
-        exit exitCode
-    
-    // Check if soup.a was created
-    let sunLibPath = Path.Combine(soupDir, "soup.a")
-    if not (File.Exists(sunLibPath)) then
-        printfn "Error: Sun did not create soup.a"
-        exit 1
-    
-    // Copy soup.a to libsoup.a in project root for consistency
     let libPath = Path.Combine(scriptDir, "libsoup.a")
-    File.Copy(sunLibPath, libPath, true)
-    let fileInfo = FileInfo(libPath)
-    printfn "Soup library built with Sun: %s (%.2f KB)" libPath (float fileInfo.Length / 1024.0)
+    let sunLibPath = Path.Combine(soupDir, "soup.a")
+    
+    if needsRebuild libPath soupDir then
+        printfn "Using Sun build system to compile Soup library..."
+        if verbose then
+            printfn ""
+            printfn "[VERBOSE] Running: %s" sunPath
+        
+        let exitCode, output, error = runCommand sunPath "" (Some soupDir)
+        
+        if exitCode <> 0 then
+            printfn "Error: Sun build failed"
+            if not (String.IsNullOrWhiteSpace output) then printfn "%s" output
+            if not (String.IsNullOrWhiteSpace error) then eprintfn "%s" error
+            exit exitCode
+        
+        // Check if soup.a was created
+        if not (File.Exists(sunLibPath)) then
+            printfn "Error: Sun did not create soup.a"
+            exit 1
+        
+        // Copy soup.a to libsoup.a in project root for consistency
+        File.Copy(sunLibPath, libPath, true)
+        let fileInfo = FileInfo(libPath)
+        printfn "Soup library built with Sun: %s (%.2f KB)" libPath (float fileInfo.Length / 1024.0)
+    else
+        printfn "Soup library is up to date, skipping rebuild (use --force to rebuild)"
+        if File.Exists(libPath) then
+            let fileInfo = FileInfo(libPath)
+            printfn "Using existing: %s (%.2f KB)" libPath (float fileInfo.Length / 1024.0)
     
     // Now compile and link the main executable using the regular method
     printfn ""
@@ -247,9 +270,9 @@ if useSun then
         
         let commonFlags = 
             if platform = "windows" then
-                "-std=c++17 -fno-rtti -O3 -ffunction-sections -fdata-sections -DSOUP_STANDALONE -D_WIN32_WINNT=0x0601"
+                "-std=c++20 -fno-rtti -O3 -ffunction-sections -fdata-sections -DSOUP_STANDALONE -D_WIN32_WINNT=0x0601"
             else
-                "-std=c++17 -fno-rtti -O3 -ffunction-sections -fdata-sections -DSOUP_STANDALONE"
+                "-std=c++20 -fno-rtti -O3 -ffunction-sections -fdata-sections -DSOUP_STANDALONE"
         
         // Compile main source
         let mainObj = Path.Combine(outputBinDir, "main.o")
@@ -287,11 +310,63 @@ if useSun then
             printfn "Binary type:"
             let exitCode, output, _ = runCommand "file" (sprintf "\"%s\"" binaryPath) None
             if exitCode = 0 then printfn "%s" output
+            
+            // Create release archives only if --release flag is set
+            if createRelease then
+                printfn ""
+                printfn "Creating release archives..."
+                let releaseName = sprintf "warframe-api-helper-%s" platform
+                let releaseDir = Path.Combine(scriptDir, releaseName)
+                
+                // Clean up any existing release directory
+                if Directory.Exists(releaseDir) then
+                    Directory.Delete(releaseDir, true)
+                Directory.CreateDirectory(releaseDir) |> ignore
+                
+                // Copy binary to release directory
+                let releaseBinaryPath = Path.Combine(releaseDir, binaryName)
+                File.Copy(binaryPath, releaseBinaryPath, true)
+                
+                // Create tar.gz
+                let tarGzName = sprintf "%s.tar.gz" releaseName
+                let tarGzPath = Path.Combine(scriptDir, tarGzName)
+                let tarExitCode, _, _ = runCommand "tar" (sprintf "-czf \"%s\" -C \"%s\" \"%s\"" tarGzPath scriptDir releaseName) None
+                if tarExitCode = 0 then
+                    let tarGzInfo = FileInfo(tarGzPath)
+                    printfn "Created: %s (%.2f KB)" tarGzName (float tarGzInfo.Length / 1024.0)
+                else
+                    printfn "Warning: Failed to create %s" tarGzName
+                
+                // Create .zip (using zip command if available, fallback to 7z)
+                let zipName = sprintf "%s.zip" releaseName
+                let zipPath = Path.Combine(scriptDir, zipName)
+                let zipCreated = 
+                    if commandExists "zip" then
+                        let zipExitCode, _, _ = runCommand "zip" (sprintf "-r \"%s\" \"%s\"" zipPath releaseName) (Some scriptDir)
+                        zipExitCode = 0
+                    elif commandExists "7z" then
+                        let zipExitCode, _, _ = runCommand "7z" (sprintf "a \"%s\" \"%s\"" zipPath releaseName) (Some scriptDir)
+                        zipExitCode = 0
+                    elif commandExists "7za" then
+                        let zipExitCode, _, _ = runCommand "7za" (sprintf "a \"%s\" \"%s\"" zipPath releaseName) (Some scriptDir)
+                        zipExitCode = 0
+                    else
+                        false
+                
+                if zipCreated then
+                    let zipInfo = FileInfo(zipPath)
+                    printfn "Created: %s (%.2f KB)" zipName (float zipInfo.Length / 1024.0)
+                else
+                    printfn "Warning: zip/7z command not found, skipping .zip creation"
+                
+                // Clean up release directory
+                if Directory.Exists(releaseDir) then
+                    Directory.Delete(releaseDir, true)
         else
             printfn "Error: Binary was not created"
             exit 1
     | None ->
-        printfn "Warning: No main source file found - only Soup library was built with Sun"
+    printfn "Warning: No main source file found - only Soup library was built with Sun"
     
     printfn ""
     printfn "Build complete for %s using Sun!" platform
@@ -332,31 +407,16 @@ if not (commandExists cxx) then
     printfn "Error: Compiler '%s' not found" cxx
     exit 1
 
-// Common compilation flags - C++17
+// Common compilation flags - C++20 for consistency with Sun build system and constexpr support
 let commonFlags = 
     if platform = "windows" then
-        "-std=c++17 -fno-rtti -O3 -ffunction-sections -fdata-sections -DSOUP_STANDALONE -D_WIN32_WINNT=0x0601"
+        "-std=c++20 -fno-rtti -O3 -ffunction-sections -fdata-sections -DSOUP_STANDALONE -D_WIN32_WINNT=0x0601"
     else
-        "-std=c++17 -fno-rtti -O3 -ffunction-sections -fdata-sections -DSOUP_STANDALONE"
+        "-std=c++20 -fno-rtti -O3 -ffunction-sections -fdata-sections -DSOUP_STANDALONE"
 
 let numCores = getCpuCoreCount()
 
-// Compile Soup library
-printfn "Compiling Soup library for %s (using %d parallel jobs)..." platform numCores
-if verbose then
-    printfn ""
-    printfn "Verbose mode: showing all compilation commands and output"
-printfn ""
-
-let soupCppFiles = 
-    if Directory.Exists(soupDir) then
-        Directory.GetFiles(soupDir, "*.cpp", SearchOption.TopDirectoryOnly)
-    else
-        [||]
-
-if soupCppFiles.Length = 0 then
-    printfn "Error: No .cpp files found in %s" soupDir
-    exit 1
+let libPath = Path.Combine(scriptDir, "libsoup.a")
 
 // Class-based compilation tracking for organization
 type CompileTask = {
@@ -365,59 +425,82 @@ type CompileTask = {
     BaseName: string
 }
 
-let compileTasks = 
-    soupCppFiles
-    |> Array.map (fun file ->
-        let baseName = Path.GetFileNameWithoutExtension(file)
-        let outputFile = Path.Combine(binDir, baseName + ".o")
-        { File = file; Output = outputFile; BaseName = baseName }
-    )
-
-let compileSoupFile (task: CompileTask) =
-    let includeFlag = sprintf "-I%s" soupDir
-    let compileArgs = 
-        if platform = "windows" then
-            sprintf "%s -c \"%s\" -o \"%s\" %s" commonFlags task.File task.Output includeFlag
-        else
-            sprintf "%s %s -c \"%s\" -o \"%s\" %s" commonFlags pieFlags task.File task.Output includeFlag
-    
-    let exitCode = runCompileCommand cxx compileArgs (Some scriptDir)
-    if exitCode <> 0 then
-        printfn "Error: Failed to compile %s" (Path.GetFileName(task.File))
-        exit exitCode
-
-// Compile all Soup files
-let mutable compiledCount = 0
-for task in compileTasks do
+// Check if Soup library needs rebuilding
+if needsRebuild libPath soupDir then
+    // Compile Soup library
+    printfn "Compiling Soup library for %s (using %d parallel jobs)..." platform numCores
     if verbose then
         printfn ""
-        printfn "Compiling %s..." (Path.GetFileName(task.File))
-    compileSoupFile task
-    compiledCount <- compiledCount + 1
+        printfn "Verbose mode: showing all compilation commands and output"
+    printfn ""
 
-printfn "Compiled %d Soup object files" compiledCount
+    let soupCppFiles = 
+        if Directory.Exists(soupDir) then
+            Directory.GetFiles(soupDir, "*.cpp", SearchOption.TopDirectoryOnly)
+        else
+            [||]
 
-// Create static library
-printfn "Creating libsoup.a..."
-let objectFiles = Directory.GetFiles(binDir, "*.o")
-if objectFiles.Length = 0 then
-    printfn "Error: No object files to link"
-    exit 1
+    if soupCppFiles.Length = 0 then
+        printfn "Error: No .cpp files found in %s" soupDir
+        exit 1
 
-let arArgs = sprintf "rcs libsoup.a %s" (String.Join(" ", objectFiles |> Array.map (fun f -> sprintf "\"%s\"" f)))
-let arExitCode = runCompileCommand "ar" arArgs (Some scriptDir)
+    let compileTasks = 
+        soupCppFiles
+        |> Array.map (fun file ->
+            let baseName = Path.GetFileNameWithoutExtension(file)
+            let outputFile = Path.Combine(binDir, baseName + ".o")
+            { File = file; Output = outputFile; BaseName = baseName }
+        )
 
-if arExitCode <> 0 then
-    printfn "Error: Failed to create libsoup.a"
-    exit arExitCode
+    let compileSoupFile (task: CompileTask) =
+        let includeFlag = sprintf "-I%s" soupDir
+        let compileArgs = 
+            if platform = "windows" then
+                sprintf "%s -c \"%s\" -o \"%s\" %s" commonFlags task.File task.Output includeFlag
+            else
+                sprintf "%s %s -c \"%s\" -o \"%s\" %s" commonFlags pieFlags task.File task.Output includeFlag
+        
+        let exitCode = runCompileCommand cxx compileArgs (Some scriptDir)
+        if exitCode <> 0 then
+            printfn "Error: Failed to compile %s" (Path.GetFileName(task.File))
+            exit exitCode
 
-let libPath = Path.Combine(scriptDir, "libsoup.a")
-if File.Exists(libPath) then
-    let fileInfo = FileInfo(libPath)
-    printfn "libsoup.a created: %s (%.2f KB)" libPath (float fileInfo.Length / 1024.0)
+    // Compile all Soup files
+    let mutable compiledCount = 0
+    for task in compileTasks do
+        if verbose then
+            printfn ""
+            printfn "Compiling %s..." (Path.GetFileName(task.File))
+        compileSoupFile task
+        compiledCount <- compiledCount + 1
+
+    printfn "Compiled %d Soup object files" compiledCount
+
+    // Create static library
+    printfn "Creating libsoup.a..."
+    let objectFiles = Directory.GetFiles(binDir, "*.o")
+    if objectFiles.Length = 0 then
+        printfn "Error: No object files to link"
+        exit 1
+
+    let arArgs = sprintf "rcs libsoup.a %s" (String.Join(" ", objectFiles |> Array.map (fun f -> sprintf "\"%s\"" f)))
+    let arExitCode = runCompileCommand "ar" arArgs (Some scriptDir)
+
+    if arExitCode <> 0 then
+        printfn "Error: Failed to create libsoup.a"
+        exit arExitCode
+
+    if File.Exists(libPath) then
+        let fileInfo = FileInfo(libPath)
+        printfn "libsoup.a created: %s (%.2f KB)" libPath (float fileInfo.Length / 1024.0)
+    else
+        printfn "Error: libsoup.a was not created"
+        exit 1
 else
-    printfn "Error: libsoup.a was not created"
-    exit 1
+    printfn "Soup library is up to date, skipping rebuild (use --force to rebuild)"
+    if File.Exists(libPath) then
+        let fileInfo = FileInfo(libPath)
+        printfn "Using existing: %s (%.2f KB)" libPath (float fileInfo.Length / 1024.0)
 
 // Find and compile main source file
 printfn ""
@@ -487,6 +570,58 @@ match findMainSource () with
         printfn "Binary type:"
         let exitCode, output, _ = runCommand "file" (sprintf "\"%s\"" binaryPath) None
         if exitCode = 0 then printfn "%s" output
+        
+        // Create release archives only if --release flag is set
+        if createRelease then
+            printfn ""
+            printfn "Creating release archives..."
+            let releaseName = sprintf "warframe-api-helper-%s" platform
+            let releaseDir = Path.Combine(scriptDir, releaseName)
+            
+            // Clean up any existing release directory
+            if Directory.Exists(releaseDir) then
+                Directory.Delete(releaseDir, true)
+            Directory.CreateDirectory(releaseDir) |> ignore
+            
+            // Copy binary to release directory
+            let releaseBinaryPath = Path.Combine(releaseDir, binaryName)
+            File.Copy(binaryPath, releaseBinaryPath, true)
+            
+            // Create tar.gz
+            let tarGzName = sprintf "%s.tar.gz" releaseName
+            let tarGzPath = Path.Combine(scriptDir, tarGzName)
+            let tarExitCode, _, _ = runCommand "tar" (sprintf "-czf \"%s\" -C \"%s\" \"%s\"" tarGzPath scriptDir releaseName) None
+            if tarExitCode = 0 then
+                let tarGzInfo = FileInfo(tarGzPath)
+                printfn "Created: %s (%.2f KB)" tarGzName (float tarGzInfo.Length / 1024.0)
+            else
+                printfn "Warning: Failed to create %s" tarGzName
+            
+            // Create .zip (using zip command if available, fallback to 7z)
+            let zipName = sprintf "%s.zip" releaseName
+            let zipPath = Path.Combine(scriptDir, zipName)
+            let zipCreated = 
+                if commandExists "zip" then
+                    let zipExitCode, _, _ = runCommand "zip" (sprintf "-r \"%s\" \"%s\"" zipPath releaseName) (Some scriptDir)
+                    zipExitCode = 0
+                elif commandExists "7z" then
+                    let zipExitCode, _, _ = runCommand "7z" (sprintf "a \"%s\" \"%s\"" zipPath releaseName) (Some scriptDir)
+                    zipExitCode = 0
+                elif commandExists "7za" then
+                    let zipExitCode, _, _ = runCommand "7za" (sprintf "a \"%s\" \"%s\"" zipPath releaseName) (Some scriptDir)
+                    zipExitCode = 0
+                else
+                    false
+            
+            if zipCreated then
+                let zipInfo = FileInfo(zipPath)
+                printfn "Created: %s (%.2f KB)" zipName (float zipInfo.Length / 1024.0)
+            else
+                printfn "Warning: zip/7z command not found, skipping .zip creation"
+            
+            // Clean up release directory
+            if Directory.Exists(releaseDir) then
+                Directory.Delete(releaseDir, true)
     else
         printfn "Error: Binary was not created"
         exit 1
