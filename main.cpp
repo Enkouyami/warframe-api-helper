@@ -181,6 +181,42 @@ static const uint8_t iv[16] = { 49, 50, 70, 71, 66, 51, 54, 45, 76, 69, 51, 45, 
 	return {};
 }
 
+// Structure to hold command-line arguments
+struct Args {
+	bool skip_scan = false;
+	bool download = true;  // Default to true
+	bool all_matches = false;
+	std::string output_file;
+};
+
+[[nodiscard]] static Args parseArgs(int argc, char* argv[])
+{
+	Args args;
+	
+	for (int arg_index = 1; arg_index < argc; ++arg_index)
+	{
+		std::string arg = argv[arg_index];
+		if (arg == "--skip-scan" || arg == "-s" || arg == "--skip-process")
+		{
+			args.skip_scan = true;
+		}
+		else if (arg == "--no-download")
+		{
+			args.download = false;
+		}
+		else if (arg == "--all-matches")
+		{
+			args.all_matches = true;
+		}
+		else if (arg.find("--output=") == 0)
+		{
+			args.output_file = arg.substr(9);
+		}
+	}
+	
+	return args;
+}
+
 [[nodiscard]] static std::string gruzzleAuthz(const ProcessHandle& mod)
 {
 	std::cout << "Gruzzling";
