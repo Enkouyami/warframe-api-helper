@@ -14,6 +14,173 @@ using namespace soup;
 static const uint8_t key[16] = { 76, 69, 79, 45, 65, 76, 69, 67, 9, 69, 79, 45, 65, 76, 69, 67 };
 static const uint8_t iv[16] = { 49, 50, 70, 71, 66, 51, 54, 45, 76, 69, 51, 45, 113, 61, 57, 0 };
 
+// Helper function to sanitize filename (remove invalid characters)
+[[nodiscard]] static std::string sanitizeFilename(const std::string& name)
+{
+	std::string sanitized = name;
+	// Replace invalid filename characters
+	for (char& character : sanitized)
+	{
+		if (character == '/' || character == '\\' || character == ':' || character == '*' || character == '?' || character == '"' || character == '<' || character == '>' || character == '|')
+		{
+			character = '_';
+		}
+	}
+	// Limit length
+	if (sanitized.length() > 50)
+	{
+		sanitized = sanitized.substr(0, 50);
+	}
+	return sanitized;
+}
+
+// Helper function to get accountId from command line or environment
+[[nodiscard]] static std::string getAccountIdFromArgs(int argc, char* argv[])
+{
+	std::string accountId;
+	
+	// Check CLI arguments first (takes precedence)
+	for (int arg_index = 1; arg_index < argc; ++arg_index)
+	{
+		std::string arg = argv[arg_index];
+		if (arg.find("--account-id=") == 0)
+		{
+			accountId = arg.substr(13); // Length of "--account-id="
+			// Remove any whitespace
+			accountId.erase(std::remove_if(accountId.begin(), accountId.end(), ::isspace), accountId.end());
+			return accountId;
+		}
+		if (arg.find("-a=") == 0)
+		{
+			accountId = arg.substr(3); // Length of "-a="
+			accountId.erase(std::remove_if(accountId.begin(), accountId.end(), ::isspace), accountId.end());
+			return accountId;
+		}
+	}
+	
+	// Check environment variable (if CLI arg not found)
+	const char* env_accountId = std::getenv("ACCOUNT_ID");
+	if (env_accountId != nullptr)
+	{
+		accountId = env_accountId;
+		// Remove any whitespace
+		accountId.erase(std::remove_if(accountId.begin(), accountId.end(), ::isspace), accountId.end());
+	}
+	
+	return accountId;
+}
+
+// Helper function to get nonce from command line or environment
+[[nodiscard]] static std::string getNonceFromArgs(int argc, char* argv[])
+{
+	std::string nonce;
+	
+	// Check CLI arguments first (takes precedence)
+	for (int arg_index = 1; arg_index < argc; ++arg_index)
+	{
+		std::string arg = argv[arg_index];
+		if (arg.find("--nonce=") == 0)
+		{
+			nonce = arg.substr(8); // Length of "--nonce="
+			// Remove any whitespace
+			nonce.erase(std::remove_if(nonce.begin(), nonce.end(), ::isspace), nonce.end());
+			return nonce;
+		}
+		if (arg.find("-n=") == 0)
+		{
+			nonce = arg.substr(3); // Length of "-n="
+			nonce.erase(std::remove_if(nonce.begin(), nonce.end(), ::isspace), nonce.end());
+			return nonce;
+		}
+	}
+	
+	// Check environment variable (if CLI arg not found)
+	const char* env_nonce = std::getenv("NONCE");
+	if (env_nonce != nullptr)
+	{
+		nonce = env_nonce;
+		// Remove any whitespace
+		nonce.erase(std::remove_if(nonce.begin(), nonce.end(), ::isspace), nonce.end());
+	}
+	
+	return nonce;
+}
+
+// Helper function to get accountId from lastData.dat files (NO EE.log)
+[[nodiscard]] static std::string getAccountIdFromLastData()
+{
+	std::vector<std::string> datFiles;
+	
+	// Try lastData.dat first
+	if (std::filesystem::exists("lastData.dat"))
+	{
+		datFiles.push_back("lastData.dat");
+	}
+	
+	// Search for lastData_*.dat files
+	try
+	{
+		for (const auto& entry : std::filesystem::directory_iterator("."))
+		{
+			if (entry.is_regular_file())
+			{
+				std::string filename = entry.path().filename().string();
+				if (filename.find("lastData_") == 0 && filename.find(".dat") == filename.length() - 4)
+				{
+					datFiles.push_back(filename);
+				}
+			}
+		}
+	}
+	catch (...)
+	{
+		// If directory iteration fails, just try the default file
+	}
+	
+	for (const auto& datFile : datFiles)
+	{
+		std::string encrypted = string::fromFile(datFile);
+		if (encrypted.empty())
+		{
+			continue;
+		}
+		
+		// Decrypt
+		std::string decrypted = encrypted;
+		aes::cbcDecrypt(
+			reinterpret_cast<uint8_t*>(decrypted.data()), decrypted.size(),
+			key, 16,
+			iv
+		);
+		
+		// Remove PKCS7 padding
+		if (!aes::pkcs7Unpad(decrypted))
+		{
+			continue;
+		}
+		
+		// Parse JSON to extract accountId
+		auto json_result = json::decode(decrypted);
+		if (json_result && json_result->isObj())
+		{
+			auto& json_object = json_result->asObj();
+			if (auto accountIdNode = json_object.find("accountId"))
+			{
+				if (accountIdNode->isStr())
+				{
+					std::string accountId = accountIdNode->asStr().value;
+					if (accountId.length() == 24)
+					{
+						return accountId;
+					}
+				}
+			}
+		}
+	}
+	
+	return {};
+}
+
 [[nodiscard]] static std::string gruzzleAuthz(const ProcessHandle& mod)
 {
 	std::cout << "Gruzzling";
