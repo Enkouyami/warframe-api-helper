@@ -217,22 +217,46 @@ struct Args {
 	return args;
 }
 
-[[nodiscard]] static std::string gruzzleAuthz(const ProcessHandle& mod)
+[[nodiscard]] static std::string gruzzleAuthz(const ProcessHandle& mod, bool allMatches = false)
 {
 	std::cout << "Gruzzling";
-	std::unordered_map<std::string, int> candidates{};
 	const auto pattern = Pattern("3F 61 63 63 6F 75 6E 74 49 64 3D"); // ?accountId=
+	std::vector<std::string> matches;
 	for (const auto& ai : mod.getAllocations())
 	{
 		if (auto res = mod.externalScan(ai.range, pattern))
 		{
-			res = res.add(11);
+			res = res.add(11); // Skip "?accountId="
 
 			char accountId[24];
 			mod.externalRead(res, accountId, 24);
 			res = res.add(24);
 
-			res = res.add(7); // &nonce=
+			// Verify we have "&nonce=" next
+			char noncePrefix[7];
+			mod.externalRead(res, noncePrefix, 7);
+			if (std::memcmp(noncePrefix, "&nonce=", 7) != 0)
+			{
+				// This match doesn't have &nonce=, skip it (enhanced algorithm requirement)
+				continue;
+			}
+			res = res.add(7); // Skip "&nonce="
+
+			// Verify accountId is valid (24 hex characters)
+			bool validAccountId = true;
+			for (int index = 0; index < 24; ++index)
+			{
+				if (!string::isHexDigitChar(accountId[index]))
+				{
+					validAccountId = false;
+					break;
+				}
+			}
+			
+			if (!validAccountId)
+			{
+				continue;
+			}
 
 			std::string authz = "?accountId=" + std::string(accountId, 24) + "&nonce=";
 			char c;
@@ -241,43 +265,94 @@ struct Args {
 				c = mod.externalRead<char>(res);
 				res = res.add(1);
 			} while (string::isNumberChar(c) && (authz.push_back(c), true));
-			std::cout << ".";
-			if (auto e = candidates.find(authz); e != candidates.end())
+			
+			// Check for sessionId after nonce (continue reading from current position)
+			// Look for "&sessionId=" pattern by reading characters directly
+			// Limit search to 200 bytes after nonce to avoid scanning too far
+			auto sessionCheckPos = res;
+			std::string sessionIdCheck;
+			for (int i = 0; i < 200 && sessionCheckPos < ai.range.end(); ++i)
 			{
-				if (++e->second == 3)
+				c = mod.externalRead<char>(sessionCheckPos);
+				sessionCheckPos = sessionCheckPos.add(1);
+				sessionIdCheck.push_back(c);
+				
+				// Check if we found "&sessionId="
+				if (sessionIdCheck.length() >= 11 && sessionIdCheck.substr(sessionIdCheck.length() - 11) == "&sessionId=")
+				{
+					// Found the pattern, now read the sessionId value
+					std::string sessionId;
+					do
+					{
+						c = mod.externalRead<char>(sessionCheckPos);
+						sessionCheckPos = sessionCheckPos.add(1);
+					} while ((string::isNumberChar(c) || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) && (sessionId.push_back(c), true));
+					if (!sessionId.empty())
+					{
+						authz += "&sessionId=" + sessionId;
+					}
+					break;
+				}
+			}
+			
+			// Verify minimum length: "?accountId=...&nonce=" + at least one digit
+			if (authz.length() > 19)
+			{
+				matches.push_back(authz);
+				if (!allMatches)
 				{
 					std::cout << " The crumbs have been gruzzled." << std::endl;
 					return authz;
 				}
 			}
-			else
-			{
-				candidates.emplace(authz, 1);
-			}
+			std::cout << ".";
 		}
 	}
 	
-	// If no candidate found with 3 occurrences, check for ones with 2 occurrences
-	std::string bestCandidate{};
-	int bestCount = 0;
-	for (const auto& [authz, count] : candidates)
+	if (!matches.empty())
 	{
-		if (count >= 2 && count > bestCount)
-		{
-			bestCandidate = authz;
-			bestCount = count;
-		}
-	}
-	
-	if (bestCount >= 2)
-	{
-		std::cout << " Warning: Found " << bestCount << " occurrences (expected 3). Using best candidate with disclaimer." << std::endl;
-		std::cout << "DISCLAIMER: This result is based on " << bestCount << " occurrences instead of the expected 3. It may be less reliable." << std::endl;
-		return bestCandidate;
+		std::cout << " Found " << matches.size() << " gruzzled crumbs." << std::endl;
+		return matches[0]; // Return first match
 	}
 	
 	std::cout << " Failed to gruzzle the crumbs." << std::endl;
 	return {};
+}
+
+// Structure to hold command-line arguments
+struct Args {
+	bool skip_scan = false;
+	bool download = true;  // Default to true
+	bool all_matches = false;
+	std::string output_file;
+};
+
+[[nodiscard]] static Args parseArgs(int argc, char* argv[])
+{
+	Args args;
+	
+	for (int arg_index = 1; arg_index < argc; ++arg_index)
+	{
+		std::string arg = argv[arg_index];
+		if (arg == "--skip-scan" || arg == "-s" || arg == "--skip-process")
+		{
+			args.skip_scan = true;
+		}
+		else if (arg == "--no-download")
+		{
+			args.download = false;
+		}
+		else if (arg == "--all-matches")
+		{
+			args.all_matches = true;
+		}
+		else if (arg.find("--output=") == 0)
+		{
+			args.output_file = arg.substr(9);
+		}
+	}
+	
+	return args;
 }
 
 int main()
