@@ -1,9 +1,37 @@
+# Rust
+/target/
+
+# C++ build artifacts
+/bin/
 int/
+*.o
+*.a
 *.exe
-*.json
-*.dat
-warframe-api-helper
-/bin
-*.tar.gz
-*.zip
+*.dll
+*.so
+*.dylib
 libsoup.a
+warframe-api-helper-linux.tar.gz
+warframe-api-helper-linux.zip
+warframe-api-helper-windows.zip
+source code.tar.gz
+source code.zip
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local run outputs
+lastData.dat
+lastData_*.dat
+inventory.json
+inventory_*.json
+*.dat
+EE.log
